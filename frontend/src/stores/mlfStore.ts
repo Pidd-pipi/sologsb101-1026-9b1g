@@ -1,5 +1,6 @@
 /**
  * 苹乳发酵 store：维护苹乳进度、苹果酸下降判定与批次状态联动。
+ * 苹乳认批次段：每段独立跟踪苹果酸；任一段进入苹乳即联动批次状态。
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
@@ -17,7 +18,7 @@ export const MLF_FILTER_KEYS = ['states']
 
 export const useMlfStore = defineStore('mlf', () => {
   const filters = ref<FilterModel>({ keyword: '', states: [] })
-  const currentBatchId = ref<string | null>(null)
+  const currentSegmentId = ref<string | null>(null)
 
   function setFilters(next: FilterModel): void {
     filters.value = next
@@ -29,17 +30,17 @@ export const useMlfStore = defineStore('mlf', () => {
 
   function applyQuery(query: LocationQuery): void {
     filters.value = queryToFilters(query, MLF_FILTER_KEYS)
-    if (typeof query.batchId === 'string' && query.batchId.length > 0) {
-      currentBatchId.value = query.batchId
+    if (typeof query.segmentId === 'string' && query.segmentId.length > 0) {
+      currentSegmentId.value = query.segmentId
     }
   }
 
   function select(id: string | null): void {
-    currentBatchId.value = id
+    currentSegmentId.value = id
   }
 
-  /** 启动苹乳：新建或复用记录，并联动批次进入苹乳发酵 */
-  async function startMlf(batchId: string, existing?: MlfRow): Promise<void> {
+  /** 启动某段苹乳：新建或复用记录，并联动批次进入苹乳发酵 */
+  async function startMlf(segmentId: string, batchId: string, existing?: MlfRow): Promise<void> {
     const now = Date.now()
     if (existing) {
       await updateMlfRow(existing.id, { state: '进行中', startDate: existing.startDate || today(), endDate: '' })
@@ -47,6 +48,7 @@ export const useMlfStore = defineStore('mlf', () => {
       await putMlf({
         id: createId('mlf'),
         batchId,
+        segmentId,
         startDate: today(),
         endDate: '',
         malicG: MALIC_START_G,
@@ -60,7 +62,7 @@ export const useMlfStore = defineStore('mlf', () => {
   }
 
   /**
-   * 录入苹果酸值；低于阈值自动判定结束并联动批次状态。
+   * 录入某段苹果酸值；低于阈值自动判定结束。
    * 返回是否因达到阈值而结束。
    */
   async function recordMalic(mlf: MlfRow, malicG: number): Promise<boolean> {
@@ -70,9 +72,6 @@ export const useMlfStore = defineStore('mlf', () => {
       state: done ? '已完成' : '进行中',
       endDate: done ? today() : ''
     })
-    if (done && mlf.state !== '已完成') {
-      await updateBatch(mlf.batchId, { state: '苹乳发酵' })
-    }
     return done
   }
 
@@ -83,7 +82,6 @@ export const useMlfStore = defineStore('mlf', () => {
 
   async function deleteMlf(mlf: MlfRow): Promise<void> {
     await removeMlf(mlf.id)
-    await updateBatch(mlf.batchId, { state: '酒精发酵' })
   }
 
   /** 苹乳进度百分比（按初始值线性折算） */
@@ -96,7 +94,7 @@ export const useMlfStore = defineStore('mlf', () => {
 
   return {
     filters,
-    currentBatchId,
+    currentSegmentId,
     setFilters,
     resetFilters,
     applyQuery,

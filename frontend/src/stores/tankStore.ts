@@ -1,17 +1,25 @@
 /**
  * 发酵罐 store：维护罐位占用、容量筛选条件与占用冲突校验。
+ * 占用以批次段为准：一个罐可被多个批次段占用，受容量 L 约束而非「一罐一批」。
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { LocationQuery } from 'vue-router'
 import type { Tank, TankState } from '@/types/tank'
 import type { FilterModel } from '@/types/filter'
-import type { BatchRow, TankRow } from '@/utils/db'
-import { assertTankAssignable, putTank, removeTank, updateTank as updateTankRow, ROW_REVISION } from '@/utils/db'
+import type { BatchRow, SegmentRow, TankRow } from '@/utils/db'
+import { assertTankCapacity, putTank, removeTank, updateTank as updateTankRow, ROW_REVISION } from '@/utils/db'
 import { createId } from '@/utils/uuid'
 import { queryToFilters } from '@/utils/query'
 
 export const TANK_FILTER_KEYS = ['materials', 'tempControls', 'states']
+
+export interface TankCapacityCheck {
+  capacityL: number
+  occupiedL: number
+  freeL: number
+  shortfallL: number
+}
 
 export const useTankStore = defineStore('tank', () => {
   const filters = ref<FilterModel>({ keyword: '', materials: [], tempControls: [], states: [] })
@@ -34,16 +42,37 @@ export const useTankStore = defineStore('tank', () => {
     selectedId.value = id
   }
 
-  /** 找出占用该罐的在罐批次（无则返回 null） */
-  function occupancyOf(tankId: string, batches: BatchRow[]): BatchRow | null {
-    return batches.find((batch) => batch.tankId === tankId && batch.state !== '已出罐') ?? null
+  /** 占用该罐的全部在罐段（未出罐批次、量 > 0） */
+  function occupantSegmentsOf(
+    tankId: string,
+    segments: SegmentRow[],
+    batches: BatchRow[]
+  ): SegmentRow[] {
+    return segments.filter((segment) => {
+      if (segment.tankId !== tankId || segment.volumeL <= 0) return false
+      const batch = batches.find((item) => item.id === segment.batchId)
+      return Boolean(batch && batch.state !== '已出罐')
+    })
   }
 
-  /** 分配前校验：罐位空闲且未被其它在罐批次占用 */
-  async function ensureAssignable(tankId: string, batchId: string | null): Promise<void> {
+  /** 该罐在罐占用量（L） */
+  function occupiedVolumeOf(
+    tankId: string,
+    segments: SegmentRow[],
+    batches: BatchRow[]
+  ): number {
+    return occupantSegmentsOf(tankId, segments, batches).reduce((sum, segment) => sum + segment.volumeL, 0)
+  }
+
+  /** 倒罐 / 分配前的容量预检：返回剩余容量与差量 */
+  async function checkCapacity(
+    tankId: string,
+    volumeL: number,
+    sameBatchId?: string
+  ): Promise<TankCapacityCheck> {
     busy.value = true
     try {
-      await assertTankAssignable(tankId, batchId)
+      return await assertTankCapacity(tankId, volumeL, { sameBatchId })
     } finally {
       busy.value = false
     }
@@ -66,10 +95,10 @@ export const useTankStore = defineStore('tank', () => {
     if (selectedId.value === id) selectedId.value = null
   }
 
-  /** 罐位状态流转（空闲 ⇄ 清洗中）；置为「在用」需由批次绑定触发 */
+  /** 罐位状态流转（空闲 ⇄ 清洗中）；置为「在用」需由批次段绑定触发 */
   async function changeState(tank: TankRow, next: TankState): Promise<void> {
     if (next === '在用') {
-      throw new Error('罐位「在用」由入罐批次绑定后自动置位，请到入罐登记页分配批次')
+      throw new Error('罐位「在用」由入罐 / 倒罐的批次段绑定后自动置位')
     }
     await updateTankRow(tank.id, { state: next })
   }
@@ -82,8 +111,9 @@ export const useTankStore = defineStore('tank', () => {
     resetFilters,
     applyQuery,
     select,
-    occupancyOf,
-    ensureAssignable,
+    occupantSegmentsOf,
+    occupiedVolumeOf,
+    checkCapacity,
     createTank,
     updateTank,
     deleteTank,

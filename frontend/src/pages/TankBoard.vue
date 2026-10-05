@@ -8,7 +8,7 @@ import FilterBar from '@/components/common/FilterBar.vue'
 import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, updateBatch, type BatchRow, type ParcelRow, type TankRow } from '@/utils/db'
+import { db, type BatchRow, type ParcelRow, type SegmentRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useTankStore } from '@/stores/tankStore'
 import {
@@ -31,6 +31,7 @@ const { rows: tanks, ready } = useIdbTable<TankRow>(() => db.tanks, {
   compare: (a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN')
 })
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
+const { rows: segments } = useIdbTable<SegmentRow>(() => db.segments, { compare: (a, b) => a.seq - b.seq })
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
 
 const selects: FilterSelectConfig[] = [
@@ -39,15 +40,27 @@ const selects: FilterSelectConfig[] = [
   { key: 'states', label: '罐位', options: TANK_STATES.map((item) => ({ label: item, value: item })) }
 ]
 
-/** 占用该罐的在罐批次 */
-function occupancyOf(tankId: string): BatchRow | null {
-  return store.occupancyOf(tankId, batches.value)
+/** 占用该罐的在罐段 */
+function occupantSegmentsOf(tankId: string): SegmentRow[] {
+  return store.occupantSegmentsOf(tankId, segments.value, batches.value)
 }
 
-function batchLabel(batch: BatchRow | null): string {
-  if (!batch) return '—'
+/** 该罐在罐占用量（L） */
+function occupiedVolumeOf(tankId: string): number {
+  return store.occupiedVolumeOf(tankId, segments.value, batches.value)
+}
+
+function segmentBatchLabel(segment: SegmentRow): string {
+  const batch = batches.value.find((item) => item.id === segment.batchId)
+  if (!batch) return '批次已删除'
   const parcel = parcels.value.find((item) => item.id === batch.parcelId)
-  return `${parcel ? parcel.name : '未知地块'} · ${batch.volumeL}L`
+  return `${parcel ? parcel.name : '未知地块'} · 第${segment.seq}段 ${segment.volumeL}L`
+}
+
+function occupantText(tankId: string): string {
+  return occupantSegmentsOf(tankId)
+    .map((segment) => segmentBatchLabel(segment))
+    .join('；')
 }
 
 const filtered = computed(() => {
@@ -67,13 +80,12 @@ const filtered = computed(() => {
 
 const totals = computed(() => {
   const totalCapacity = tanks.value.reduce((sum, tank) => sum + tank.capacityL, 0)
-  const usedCapacity = tanks.value
-    .filter((tank) => occupancyOf(tank.id) !== null)
-    .reduce((sum, tank) => sum + tank.capacityL, 0)
+  const usedCapacity = tanks.value.reduce((sum, tank) => sum + occupiedVolumeOf(tank.id), 0)
   return {
     tankCount: tanks.value.length,
     totalCapacity,
     usedCapacity,
+    freeCapacity: totalCapacity - usedCapacity,
     usageRatio: totalCapacity > 0 ? Math.round((usedCapacity / totalCapacity) * 100) : 0,
     freeCount: tanks.value.filter((tank) => tank.state === '空闲').length
   }
@@ -122,9 +134,9 @@ async function submit(): Promise<void> {
 }
 
 async function remove(tank: TankRow): Promise<void> {
-  const occupied = occupancyOf(tank.id)
-  if (occupied) {
-    ElMessage.warning(`罐 ${tank.code} 正被批次占用，请先出罐或改绑其它罐位`)
+  const occupied = occupiedVolumeOf(tank.id)
+  if (occupied > 0) {
+    ElMessage.warning(`罐 ${tank.code} 仍有 ${occupied}L 在罐批次段，请先出罐或倒罐改绑其它罐位`)
     return
   }
   try {
@@ -148,31 +160,9 @@ async function changeState(tank: TankRow, next: TankState): Promise<void> {
   }
 }
 
-/** 为该罐分配一个在罐批次（真实占用冲突校验） */
-async function assignBatch(tank: TankRow): Promise<void> {
-  const candidates = batches.value.filter((batch) => batch.state !== '已出罐' && batch.tankId !== tank.id)
-  if (candidates.length === 0) {
-    ElMessage.info('暂无待分配的在罐批次')
-    return
-  }
-  try {
-    const { value } = await ElMessageBox.prompt(
-      `可分配批次：\n${candidates.map((batch) => `${batch.id}（${batchLabel(batch)}）`).join('\n')}`,
-      `为罐 ${tank.code} 分配批次`,
-      { inputPlaceholder: '粘贴批次 id', confirmButtonText: '分配', cancelButtonText: '取消' }
-    )
-    const picked = candidates.find((batch) => batch.id === value.trim())
-    if (!picked) {
-      ElMessage.error('批次 id 不存在，请重新选择')
-      return
-    }
-    await store.ensureAssignable(tank.id, picked.id)
-    await store.updateTank(tank.id, { state: '在用' })
-    await updateBatch(picked.id, { tankId: tank.id })
-    ElMessage.success('罐位已分配')
-  } catch (error) {
-    if (error instanceof Error && error.message) ElMessage.warning(error.message)
-  }
+/** 罐位分配改为倒罐：引导到作业页对指定段开工 */
+function goRacking(): void {
+  void router.push(ROUTES.operations)
 }
 
 function onFilterChange(next: FilterModel): void {
@@ -209,8 +199,8 @@ watch(
       <StatBadge label="罐总数" :value="totals.tankCount" suffix="个" icon="Grid" tone="primary" />
       <StatBadge label="空闲罐位" :value="totals.freeCount" suffix="个" icon="Files" tone="success" />
       <StatBadge label="总容量" :value="totals.totalCapacity" suffix="L" icon="Histogram" tone="info" />
-      <StatBadge label="已占用容量" :value="totals.usedCapacity" suffix="L" icon="DataLine" tone="warning" />
-      <StatBadge label="罐容利用率" :value="totals.usageRatio" :percent="totals.usageRatio" show-percent tone="danger" icon="PieChart" />
+      <StatBadge label="已占用" :value="totals.usedCapacity" suffix="L" icon="DataLine" tone="warning" />
+      <StatBadge label="剩余容量" :value="totals.freeCapacity" suffix="L" icon="PieChart" tone="success" />
     </div>
 
     <FilterBar
@@ -225,7 +215,7 @@ watch(
       <template #header>
         <div class="card-title">
           <span>罐位清单（{{ filtered.length }} / {{ tanks.length }}）</span>
-          <span class="muted">占用冲突校验：同一在罐批次不可占用两个罐位</span>
+      <span class="muted">按段占用：一个罐可容纳多个批次段，受容量（L）约束</span>
         </div>
       </template>
 
@@ -238,29 +228,43 @@ watch(
       />
 
       <el-table v-else :data="filtered" stripe border>
-        <el-table-column prop="code" label="罐号" width="110" />
-        <el-table-column prop="material" label="材质" width="110" />
-        <el-table-column prop="capacityL" label="容量(L)" width="110" align="right" />
-        <el-table-column prop="tempControl" label="温控方式" width="110" />
-        <el-table-column label="罐位状态" width="130">
+        <el-table-column prop="code" label="罐号" width="100" />
+        <el-table-column prop="material" label="材质" width="100" />
+        <el-table-column prop="capacityL" label="容量(L)" width="100" align="right" />
+        <el-table-column label="在罐量(L)" width="110" align="right">
           <template #default="{ row }">
-            <StageTag :value="row.state" />
+            <span :class="{ 'over-cap': occupiedVolumeOf(row.id) > row.capacityL }">
+              {{ occupiedVolumeOf(row.id) }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column label="占用批次" min-width="200">
+        <el-table-column label="剩余(L)" width="100" align="right">
           <template #default="{ row }">
-            <span v-if="occupancyOf(row.id)">{{ batchLabel(occupancyOf(row.id)) }}</span>
+            <el-tag :type="row.capacityL - occupiedVolumeOf(row.id) <= 0 ? 'danger' : 'success'" size="small" effect="plain">
+              {{ row.capacityL - occupiedVolumeOf(row.id) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="tempControl" label="温控" width="90" />
+        <el-table-column label="罐位状态" width="110">
+          <template #default="{ row }">
+            <StageTag :value="row.state" size="small" />
+          </template>
+        </el-table-column>
+        <el-table-column label="占用段" min-width="240">
+          <template #default="{ row }">
+            <span v-if="occupantSegmentsOf(row.id).length > 0">{{ occupantText(row.id) }}</span>
             <span v-else class="muted">未占用</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="320" fixed="right">
+        <el-table-column label="操作" width="300" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="row.state === '在用'" @click="assignBatch(row)">分配批次</el-button>
+            <el-button link type="primary" @click="goRacking">倒罐入此罐</el-button>
             <el-button
               v-if="row.state !== '清洗中'"
               link
               type="warning"
-              :disabled="occupancyOf(row.id) !== null"
+              :disabled="occupiedVolumeOf(row.id) > 0"
               @click="changeState(row, '清洗中')"
             >
               转清洗
@@ -308,5 +312,14 @@ watch(
 <style scoped>
 .full {
   width: 100%;
+}
+
+.muted {
+  color: #8c8479;
+}
+
+.over-cap {
+  color: #d63a4a;
+  font-weight: 700;
 }
 </style>

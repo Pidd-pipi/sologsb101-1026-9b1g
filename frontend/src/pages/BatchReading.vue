@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** /batches 入罐登记与发酵读数录入：逐日比重/温度/糖度趋势与超温标记 */
+/** /batches 入罐登记与发酵读数录入：倒罐后按批次段录入，逐日比重/温度/糖度趋势与超温标记 */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -8,12 +8,13 @@ import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
-import { db, type BatchRow, type ParcelRow, type ReadingRow, type TankRow } from '@/utils/db'
+import { db, ROW_REVISION, type BatchRow, type ParcelRow, type ReadingRow, type SegmentRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useFermentTrend } from '@/hooks/useFermentTrend'
 import { useBatchStore } from '@/stores/batchStore'
 import { BATCH_STATES, createEmptyBatch, type Batch } from '@/types/batch'
 import { OVER_TEMP_C, createEmptyReading, type Reading } from '@/types/reading'
+import { sumSegmentVolume } from '@/types/segment'
 import type { FilterSelectConfig, FilterModel } from '@/types/filter'
 import { filtersToQuery } from '@/utils/query'
 
@@ -23,6 +24,9 @@ const store = useBatchStore()
 
 const { rows: batches, ready } = useIdbTable<BatchRow>(() => db.batches, {
   compare: (a, b) => b.harvestDate.localeCompare(a.harvestDate)
+})
+const { rows: segments } = useIdbTable<SegmentRow>(() => db.segments, {
+  compare: (a, b) => a.seq - b.seq
 })
 const { rows: readings } = useIdbTable<ReadingRow>(() => db.readings, {
   compare: (a, b) => a.date.localeCompare(b.date)
@@ -53,13 +57,49 @@ const currentBatch = computed<BatchRow | null>(
   () => batches.value.find((batch) => batch.id === store.currentBatchId) ?? null
 )
 
+/** 当前批次的全部段（倒罐后多段） */
+const batchSegments = computed<SegmentRow[]>(() =>
+  segments.value
+    .filter((segment) => segment.batchId === store.currentBatchId)
+    .sort((a, b) => a.seq - b.seq)
+)
+
+/** 当前选中的段（读数认段） */
+const currentSegmentId = ref<string | null>(null)
+const currentSegment = computed<SegmentRow | null>(
+  () => batchSegments.value.find((segment) => segment.id === currentSegmentId.value) ?? batchSegments.value[0] ?? null
+)
+
+/** 段量合计与守恒差额（应恒等于入罐量，差额恒为 0） */
+const segmentConservation = computed(() => {
+  const total = sumSegmentVolume(batchSegments.value)
+  return { total, gap: currentBatch.value ? currentBatch.value.volumeL - total : 0 }
+})
+
+// 切换批次时默认选中第一段
+watch(
+  () => store.currentBatchId,
+  () => {
+    currentSegmentId.value = null
+  }
+)
+
+const segmentReadings = computed<ReadingRow[]>(() =>
+  readings.value
+    .filter((row) => row.segmentId === currentSegment.value?.id)
+    .sort((a, b) => a.date.localeCompare(b.date))
+)
+
+/** 批次下所有段的读数（全段视图） */
 const batchReadings = computed<ReadingRow[]>(() =>
   readings.value
     .filter((row) => row.batchId === store.currentBatchId)
     .sort((a, b) => a.date.localeCompare(b.date))
 )
 
-const trend = useFermentTrend(batchReadings)
+const showAllSegments = ref(false)
+const trendReadings = computed(() => (showAllSegments.value ? batchReadings.value : segmentReadings.value))
+const trend = useFermentTrend(trendReadings)
 
 const batchTotals = computed(() => {
   const active = batches.value.filter((batch) => batch.state !== '已出罐')
@@ -82,6 +122,11 @@ function tankCode(tankId: string): string {
   return tanks.value.find((item) => item.id === tankId)?.code ?? '未知罐'
 }
 
+/** 段的可读标签：罐号 + 段量 */
+function segmentLabel(segment: SegmentRow): string {
+  return `第${segment.seq}段 · ${tankCode(segment.tankId)} · ${segment.volumeL}L`
+}
+
 /** 趋势条高度百分比（比重越大条越高） */
 function barHeight(gravity: number): number {
   const { min, max } = trend.range.value
@@ -100,15 +145,20 @@ const batchRules: FormRules = {
   volumeL: [{ required: true, message: '请填写入罐量', trigger: 'blur' }]
 }
 
-/** 可选罐位：状态非「清洗中」，且未被其它在罐批次占用 */
+/** 可选罐位：非清洗中，且按容量算放得下入罐量（同罐可容纳多批，受 L 约束） */
 const assignableTanks = computed(() =>
-  tanks.value.filter((tank) => {
-    if (tank.state === '清洗中') return false
-    const occupied = batches.value.some(
-      (batch) => batch.tankId === tank.id && batch.state !== '已出罐' && batch.id !== store.currentBatchId
-    )
-    return !occupied
-  })
+  tanks.value
+    .filter((tank) => tank.state !== '清洗中')
+    .map((tank) => {
+      const occupied = segments.value
+        .filter((segment) => segment.tankId === tank.id && segment.volumeL > 0)
+        .filter((segment) => {
+          const batch = batches.value.find((item) => item.id === segment.batchId)
+          return batch && batch.state !== '已出罐'
+        })
+        .reduce((sum, segment) => sum + segment.volumeL, 0)
+      return { tank, freeL: tank.capacityL - occupied }
+    })
 )
 
 function openCreateBatch(): void {
@@ -123,7 +173,7 @@ async function submitBatch(): Promise<void> {
   if (!valid) return
   try {
     await store.createBatch({ ...batchForm })
-    ElMessage.success('批次已入罐，罐位置为「在用」')
+    ElMessage.success('批次已入罐并建立唯一整段，罐位置为「在用」')
     batchDialog.value = false
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '入罐失败')
@@ -132,7 +182,7 @@ async function submitBatch(): Promise<void> {
 
 async function shipBatch(batch: BatchRow): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确认批次 ${batch.id} 出罐？出罐后将自动释放罐位并归档读数。`, '出罐确认', {
+    await ElMessageBox.confirm(`确认批次 ${batch.id} 出罐？出罐后全部段将释放罐位并归档读数。`, '出罐确认', {
       type: 'warning',
       confirmButtonText: '确认出罐'
     })
@@ -140,12 +190,12 @@ async function shipBatch(batch: BatchRow): Promise<void> {
     return
   }
   await store.ship(batch.id)
-  ElMessage.success('批次已出罐，罐位已释放')
+  ElMessage.success('批次已出罐，各段罐位已释放')
 }
 
 async function removeBatch(batch: BatchRow): Promise<void> {
   try {
-    await ElMessageBox.confirm(`删除批次 ${batch.id} 会同时删除其读数 / 作业 / 苹乳 / 品评记录，是否继续？`, '删除确认', {
+    await ElMessageBox.confirm(`删除批次 ${batch.id} 会同时删除其段 / 读数 / 作业 / 苹乳 / 品评记录，是否继续？`, '删除确认', {
       type: 'warning',
       confirmButtonText: '确认删除'
     })
@@ -156,7 +206,7 @@ async function removeBatch(batch: BatchRow): Promise<void> {
   ElMessage.success('批次及其下级记录已删除')
 }
 
-/* ------------------------------ 读数录入 ------------------------------ */
+/* ------------------------------ 读数录入（认段） ------------------------------ */
 const readingDialog = ref(false)
 const readingFormRef = ref<FormInstance>()
 const readingForm = reactive<Omit<Reading, 'id'>>(createEmptyReading())
@@ -167,32 +217,35 @@ const readingRules: FormRules = {
 }
 
 function openCreateReading(): void {
-  if (!currentBatch.value) {
-    ElMessage.warning('请先选择批次')
+  if (!currentSegment.value) {
+    ElMessage.warning('请先选择批次段')
     return
   }
-  Object.assign(readingForm, createEmptyReading())
-  readingForm.batchId = currentBatch.value.id
+  Object.assign(readingForm, createEmptyReading(currentSegment.value.id, currentSegment.value.batchId))
   readingDialog.value = true
 }
 
 async function submitReading(): Promise<void> {
   const valid = await readingFormRef.value?.validate().catch(() => false)
   if (!valid) return
-  const duplicate = batchReadings.value.some((row) => row.date === readingForm.date)
+  const scope = showAllSegments.value ? batchReadings.value : segmentReadings.value
+  const duplicate = scope.some(
+    (row) => row.date === readingForm.date && row.segmentId === readingForm.segmentId
+  )
   if (duplicate) {
-    ElMessage.warning('该批次当日已有读数，请直接编辑已有记录')
+    ElMessage.warning('该段当日已有读数，请直接编辑已有记录')
     return
   }
   const now = Date.now()
   await db.readings.put({
     ...readingForm,
+    batchId: currentSegment.value?.batchId ?? readingForm.batchId,
     id: `reading-${now.toString(36)}`,
-    revision: 1,
+    revision: ROW_REVISION,
     createdAt: now,
     updatedAt: now
   })
-  ElMessage.success('读数已记录')
+  ElMessage.success('读数已记录到该段')
   readingDialog.value = false
 }
 
@@ -289,7 +342,8 @@ watch(currentBatch, (batch) => {
                 <StageTag :value="batch.state" size="small" />
               </div>
               <div class="batch-item__meta">
-                {{ batch.harvestDate }} · {{ batch.volumeL }}L · {{ batch.brix }}°Bx · 罐 {{ tankCode(batch.tankId) }}
+                {{ batch.harvestDate }} · {{ batch.volumeL }}L · {{ batch.brix }}°Bx
+                · 段 {{ segments.filter((s) => s.batchId === batch.id).length }} 个
               </div>
               <div class="batch-item__actions">
                 <el-button link type="primary" size="small" @click.stop="shipBatch(batch)">出罐</el-button>
@@ -321,6 +375,32 @@ watch(currentBatch, (batch) => {
 
           <template v-else>
             <el-alert
+              :type="segmentConservation.gap === 0 ? 'success' : 'error'"
+              :closable="false"
+              show-icon
+              class="mb"
+              :title="`段量合计 ${segmentConservation.total}L / 入罐量 ${currentBatch.volumeL}L`"
+              :description="
+                segmentConservation.gap === 0
+                  ? '段量合计等于批次入罐量，守恒正常。'
+                  : `段量合计与入罐量相差 ${segmentConservation.gap}L，请检查倒罐拆分。`
+              "
+            />
+
+            <div class="segment-bar">
+              <el-radio-group v-model="currentSegmentId" size="small">
+                <el-radio-button
+                  v-for="segment in batchSegments"
+                  :key="segment.id"
+                  :value="segment.id"
+                >
+                  {{ segmentLabel(segment) }}
+                </el-radio-button>
+              </el-radio-group>
+              <el-checkbox v-model="showAllSegments" size="small">全段汇总视图</el-checkbox>
+            </div>
+
+            <el-alert
               v-if="trend.stuck.value"
               type="warning"
               :closable="false"
@@ -341,13 +421,21 @@ watch(currentBatch, (batch) => {
 
             <div class="metric-row">
               <StageTag :value="trend.stage.value" />
+              <el-tag type="info" effect="plain">
+                {{ showAllSegments ? '全段' : currentSegment ? segmentLabel(currentSegment) : '' }}
+              </el-tag>
               <el-tag type="info" effect="plain">最新比重 {{ trend.latestGravity.value || '—' }}</el-tag>
               <el-tag type="info" effect="plain">日均下降 {{ trend.avgDeclinePerDay.value }}</el-tag>
               <el-tag type="info" effect="plain">潜在酒精度 {{ trend.potential.value }}%vol</el-tag>
             </div>
 
             <div class="trend-bar">
-              <div v-for="point in trend.points.value" :key="point.id" class="trend-bar__item" :title="`${point.date} · ${point.gravity}`">
+              <div
+                v-for="point in trend.points.value"
+                :key="point.id"
+                class="trend-bar__item"
+                :title="`${point.date} · ${point.gravity}`"
+              >
                 <div
                   class="trend-bar__fill"
                   :class="{ 'is-over': point.overTemp }"
@@ -358,20 +446,27 @@ watch(currentBatch, (batch) => {
             </div>
 
             <el-table :data="trend.points.value" stripe border class="mt">
-              <el-table-column prop="date" label="日期" width="120" />
-              <el-table-column prop="gravity" label="比重" width="100" align="right" />
-              <el-table-column prop="brix" label="糖度(°Bx)" width="110" align="right" />
-              <el-table-column prop="tempC" label="温度(℃)" width="110" align="right">
+              <el-table-column label="所属段" width="120">
+                <template #default="{ row }">
+                  {{ segments.find((s) => s.id === row.segmentId)
+                    ? `第${segments.find((s) => s.id === row.segmentId)?.seq}段`
+                    : '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="date" label="日期" width="110" />
+              <el-table-column prop="gravity" label="比重" width="90" align="right" />
+              <el-table-column prop="brix" label="糖度(°Bx)" width="100" align="right" />
+              <el-table-column prop="tempC" label="温度(℃)" width="100" align="right">
                 <template #default="{ row }">
                   <el-tag :type="row.overTemp ? 'danger' : 'success'" effect="plain" size="small">
                     {{ row.tempC }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="下降速率/日" width="130" align="right">
+              <el-table-column label="下降速率/日" width="120" align="right">
                 <template #default="{ row }">{{ row.declinePerDay }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="90">
+              <el-table-column label="操作" width="80">
                 <template #default="{ row }">
                   <el-button link type="danger" size="small" @click="removeReading(row)">删除</el-button>
                 </template>
@@ -390,14 +485,20 @@ watch(currentBatch, (batch) => {
           </el-select>
         </el-form-item>
         <el-form-item label="发酵罐" prop="tankId">
-          <el-select v-model="batchForm.tankId" class="full" placeholder="仅列出可分配罐位">
+          <el-select v-model="batchForm.tankId" class="full" placeholder="仅列出可分配罐位（标注剩余容量）">
             <el-option
               v-for="item in assignableTanks"
-              :key="item.id"
-              :label="`${item.code} · ${item.material} ${item.capacityL}L`"
-              :value="item.id"
+              :key="item.tank.id"
+              :label="`${item.tank.code} · ${item.tank.material} ${item.tank.capacityL}L（剩 ${item.freeL}L）`"
+              :value="item.tank.id"
+              :disabled="item.freeL < batchForm.volumeL"
             />
           </el-select>
+          <div v-if="batchForm.tankId" class="form-hint">
+            选中罐剩余
+            {{ assignableTanks.find((item) => item.tank.id === batchForm.tankId)?.freeL ?? 0 }}L，本批
+            {{ batchForm.volumeL }}L
+          </div>
         </el-form-item>
         <el-form-item label="采收日期">
           <el-date-picker v-model="batchForm.harvestDate" type="date" value-format="YYYY-MM-DD" class="full" />
@@ -445,6 +546,21 @@ watch(currentBatch, (batch) => {
 
 .mb {
   margin-bottom: 12px;
+}
+
+.segment-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.form-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8c8479;
 }
 
 .mt {

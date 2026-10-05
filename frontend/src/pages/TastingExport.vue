@@ -345,9 +345,9 @@ watch(
             <el-descriptions-item label="库名">{{ DB_NAME }}</el-descriptions-item>
             <el-descriptions-item label="结构版本">v{{ DB_SCHEMA_VERSION }}</el-descriptions-item>
             <el-descriptions-item label="地块/罐">{{ dbCounts.parcels ?? 0 }} / {{ dbCounts.tanks ?? 0 }}</el-descriptions-item>
-            <el-descriptions-item label="批次/读数">{{ dbCounts.batches ?? 0 }} / {{ dbCounts.readings ?? 0 }}</el-descriptions-item>
-            <el-descriptions-item label="作业/苹乳">{{ dbCounts.operations ?? 0 }} / {{ dbCounts.mlfs ?? 0 }}</el-descriptions-item>
-            <el-descriptions-item label="品评">{{ dbCounts.tastings ?? 0 }}</el-descriptions-item>
+            <el-descriptions-item label="批次/段">{{ dbCounts.batches ?? 0 }} / {{ dbCounts.segments ?? 0 }}</el-descriptions-item>
+            <el-descriptions-item label="读数/作业">{{ dbCounts.readings ?? 0 }} / {{ dbCounts.operations ?? 0 }}</el-descriptions-item>
+            <el-descriptions-item label="苹乳/品评">{{ dbCounts.mlfs ?? 0 }} / {{ dbCounts.tastings ?? 0 }}</el-descriptions-item>
           </el-descriptions>
           <div class="btn-row">
             <el-button :icon="Download" @click="exportLibrary">导出整库 JSON</el-button>

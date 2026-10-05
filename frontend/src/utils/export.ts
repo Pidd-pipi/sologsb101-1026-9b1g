@@ -3,17 +3,18 @@
  * 品评页用于导出单批次完整档案，也是「导入导出备份」的数据校验入口。
  */
 import type { Batch } from '../types/batch'
+import type { BatchSegment } from '../types/segment'
 import type { Parcel } from '../types/parcel'
 import type { Tank } from '../types/tank'
 import type { Reading } from '../types/reading'
 import type { Operation } from '../types/operation'
 import type { Mlf } from '../types/mlf'
 import type { Tasting } from '../types/tasting'
-import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listTastings } from './db'
+import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listTastings, listSegments } from './db'
 import { abvFromSg, gravityDeclinePerDay, isOverTemp, potentialAbv } from './gravity'
 import { nowIso } from './uuid'
 
-/** 单批次档案：导出给车间与酒窖存档用 */
+/** 单批次档案：导出给车间与酒窖存档用（含倒罐后的批次段） */
 export interface BatchArchive {
   name: string
   schemaVersion: number
@@ -21,11 +22,17 @@ export interface BatchArchive {
   batch: Batch
   parcel: Parcel | null
   tank: Tank | null
+  /** 批次段：倒罐后每段绑定一个发酵罐，段量合计 = 入罐量 */
+  segments: BatchSegment[]
   readings: Reading[]
   operations: Operation[]
-  mlf: Mlf | null
+  mlfs: Mlf[]
   tastings: Tasting[]
   summary: {
+    /** 段数量 */
+    segmentCount: number
+    /** 段量合计（应等于入罐量） */
+    segmentVolumeTotal: number
     /** 读数覆盖天数 */
     days: number
     /** 平均比重日下降速率 */
@@ -47,16 +54,20 @@ export interface BatchArchive {
 export async function buildBatchArchive(batchId: string): Promise<BatchArchive> {
   const batch = await db.batches.get(batchId)
   if (!batch) throw new Error('批次不存在，无法导出档案')
-  const [parcel, tank, allReadings, allOperations, mlf, allTastings] = await Promise.all([
+  const [parcel, segments, allReadings, allOperations, allMlfs, allTastings] = await Promise.all([
     batch.parcelId ? db.parcels.get(batch.parcelId) : Promise.resolve(undefined),
-    batch.tankId ? db.tanks.get(batch.tankId) : Promise.resolve(undefined),
+    listSegments().then((rows) => rows.filter((row) => row.batchId === batchId)),
     listReadings(),
     listOperations(),
-    db.mlfs.where('batchId').equals(batchId).first(),
+    db.mlfs.where('batchId').equals(batchId).toArray(),
     listTastings()
   ])
+  // tank 取首段所在罐（批次可跨多罐）
+  const firstTankId = segments[0]?.tankId ?? batch.tankId
+  const tank = firstTankId ? await db.tanks.get(firstTankId) : undefined
   const readings = allReadings.filter((row) => row.batchId === batchId)
   const operations = allOperations.filter((row) => row.batchId === batchId)
+  const mlfs = allMlfs.filter((row) => row.batchId === batchId)
   const tastings = allTastings.filter((row) => row.batchId === batchId)
 
   let declineSum = 0
@@ -80,11 +91,14 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
     batch: stripRevision(batch),
     parcel: parcel ? stripRevision(parcel) : null,
     tank: tank ? stripRevision(tank) : null,
+    segments: segments.map(stripRevision),
     readings: readings.map(stripRevision),
     operations: operations.map(stripRevision),
-    mlf: mlf ? stripRevision(mlf) : null,
+    mlfs: mlfs.map(stripRevision),
     tastings: tastings.map(stripRevision),
     summary: {
+      segmentCount: segments.length,
+      segmentVolumeTotal: segments.reduce((sum, segment) => sum + segment.volumeL, 0),
       days: readings.length,
       avgDeclinePerDay: readings.length > 1 ? Number((declineSum / (readings.length - 1)).toFixed(4)) : 0,
       latestGravity: last ? last.gravity : 0,

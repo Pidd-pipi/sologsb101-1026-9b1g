@@ -1,8 +1,10 @@
-/** 发酵读数：逐日记录比重、温度与糖度 */
+/** 发酵读数：逐日记录比重、温度与糖度；倒罐后认批次段 */
 export interface Reading {
   id: string
-  /** 所属批次 */
+  /** 所属批次（冗余，便于按批次聚合） */
   batchId: string
+  /** 所属批次段：读数跟随倒罐后的具体罐段 */
+  segmentId: string
   /** 记录日期 YYYY-MM-DD */
   date: string
   /** 比重（SG） */
@@ -26,6 +28,6 @@ export const OVER_TEMP_C = 30
 /** 发酵停滞判定：连续 2 日比重下降 < 0.002 视为停滞 */
 export const STUCK_DECLINE_THRESHOLD = 0.002
 
-export function createEmptyReading(): Omit<Reading, 'id'> {
-  return { batchId: '', date: new Date().toISOString().slice(0, 10), gravity: 1.09, tempC: 24, brix: 22 }
+export function createEmptyReading(segmentId = '', batchId = ''): Omit<Reading, 'id'> {
+  return { batchId, segmentId, date: new Date().toISOString().slice(0, 10), gravity: 1.09, tempC: 24, brix: 22 }
 }
