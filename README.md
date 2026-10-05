@@ -67,9 +67,9 @@ npm run preview    # 本地预览构建产物（http://localhost:22826）
 | --- | --- | --- | --- |
 | `/parcels` | 地块与品种台账 | Parcel、Batch | 新建/编辑/删除地块、按品种与朝向筛选、回显在罐批次数与累计入罐量、筛选同步 URL query |
 | `/tanks` | 发酵罐容量配置与罐位看板 | Tank、Batch | 按材质/温控/罐位筛选、罐位占用冲突校验、清洗状态流转 |
-| `/batches` | 入罐登记与发酵读数 | Batch、Reading、Parcel、Tank | 绑定地块与罐入罐、逐日录比重/温度/糖度、趋势条、超温标记、出罐释放罐位 |
-| `/operations` | 倒罐与压帽作业编排 | Operation、Batch | 按日期排班、拖拽调序（含上下移按钮）、指派操作人、完成回写批次最近作业时间 |
-| `/mlf` | 苹果酸乳酸发酵跟踪 | Mlf、Batch、Reading | 启动苹乳、逐次录入苹果酸、低于阈值自动判定结束并联动批次状态 |
+| `/batches` | 入罐登记与发酵读数 | Batch、Segment、Reading、Parcel、Tank | 绑定地块与罐入罐、倒罐绑段（段量守恒）、逐日录比重/温度/糖度、趋势条、超温标记、容量不足拒绝开工并显示差量、出罐释放罐位 |
+| `/operations` | 倒罐与压帽作业编排 | Operation、Segment、Batch | 作业认段、按日期排班、拖拽调序（含上下移按钮）、指派操作人、完成回写批次最近作业时间 |
+| `/mlf` | 苹果酸乳酸发酵跟踪 | Mlf、Segment、Batch、Reading | 苹乳按段启动与跟踪、逐次录入苹果酸、低于阈值自动判定结束并联动批次状态 |
 | `/tasting` | 品评调配与批次档案 | Tasting 及全部模型 | 同批次多次品评并列对比、批次档案 JSON 导出、本地库版本查看与整库导入导出 |
 
 ---
@@ -90,8 +90,8 @@ sologsb101-1026/
     ├── public/favicon.svg
     └── src/
         ├── main.ts  App.vue  env.d.ts
-        ├── types/              # parcel.ts tank.ts batch.ts reading.ts operation.ts mlf.ts tasting.ts filter.ts
-        ├── stores/             # parcelStore tankStore batchStore operationStore mlfStore
+        ├── types/              # parcel.ts tank.ts batch.ts segment.ts reading.ts operation.ts mlf.ts tasting.ts filter.ts
+        ├── stores/             # parcelStore tankStore batchStore segmentStore operationStore mlfStore
         ├── components/common/  # StageTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
         ├── hooks/              # useFermentTrend.ts useIdbTable.ts
         ├── utils/              # gravity.ts db.ts export.ts seed.ts uuid.ts query.ts
@@ -104,9 +104,10 @@ sologsb101-1026/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
-- **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `parcels` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评），保证每个页面首次打开都有内容；播种幂等，清空后重进会重新播种。
+- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），结构版本号 `version(2)`，并带 `upgrade()` 迁移逻辑（v1 为历史行补齐行修订号与时间戳；v2 新增批次段表，为旧批次补出唯一整段并把读数/作业/苹乳认到段）。
+- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`segments` 批次段、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配，共 8 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **批次段与倒罐**：倒罐后一个批次分到多个发酵罐，每段绑定一个罐位，同批次各段量之和恒等于入罐量；读数、作业、苹乳都认段。倒罐时目标罐容量不足会拒绝开工并显示差量；并发保存时先到者占住目标段，后到者保留草稿、列出冲突罐与差量并重试。
+- **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `parcels` 表为空时调用 `seedDatabase()`，灌入互相引用的演示数据（地块 → 发酵罐 → 批次 → 批次段 → 读数/作业/苹乳/品评），保证每个页面首次打开都有内容；播种幂等，清空后重进会重新播种。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **数据迁移**：在「品评与批次档案」页可导出整库 JSON 备份，或导出单批次档案；在其它设备用「导入备份」还原。
-- **级联规则**：删除地块会级联删除其下批次与批次的读数/作业/苹乳/品评并释放罐位；在罐批次不允许删除发酵罐。
+- **数据迁移**：在「品评与批次档案」页可导出整库 JSON 备份（含批次段），或导出单批次档案；在其它设备用「导入备份」还原（旧备份无段时按批次补唯一整段）。
+- **级联规则**：删除地块会级联删除其下批次与批次的段/读数/作业/苹乳/品评并释放罐位；在罐段不允许删除发酵罐。

@@ -6,6 +6,8 @@ export interface Mlf {
   id: string
   /** 所属批次 */
   batchId: string
+  /** 所属批次段（苹乳按段跟踪） */
+  segmentId: string
   /** 启动日期 */
   startDate: string
   /** 结束日期（未结束为空串） */
@@ -26,6 +28,7 @@ export const MLF_STATES: MlfState[] = ['未启动', '进行中', '已完成']
 export function createEmptyMlf(): Omit<Mlf, 'id'> {
   return {
     batchId: '',
+    segmentId: '',
     startDate: new Date().toISOString().slice(0, 10),
     endDate: '',
     malicG: MALIC_START_G,

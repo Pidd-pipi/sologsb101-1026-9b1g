@@ -5,11 +5,12 @@
 import type { Batch } from '../types/batch'
 import type { Parcel } from '../types/parcel'
 import type { Tank } from '../types/tank'
+import type { Segment } from '../types/segment'
 import type { Reading } from '../types/reading'
 import type { Operation } from '../types/operation'
 import type { Mlf } from '../types/mlf'
 import type { Tasting } from '../types/tasting'
-import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listTastings } from './db'
+import { db, DB_NAME, DB_SCHEMA_VERSION, listOperations, listReadings, listSegmentsByBatch, listTastings } from './db'
 import { abvFromSg, gravityDeclinePerDay, isOverTemp, potentialAbv } from './gravity'
 import { nowIso } from './uuid'
 
@@ -21,6 +22,7 @@ export interface BatchArchive {
   batch: Batch
   parcel: Parcel | null
   tank: Tank | null
+  segments: Segment[]
   readings: Reading[]
   operations: Operation[]
   mlf: Mlf | null
@@ -38,6 +40,8 @@ export interface BatchArchive {
     estimatedAbv: number
     /** 超温天数 */
     overTempDays: number
+    /** 段量合计（应等于批次入罐量） */
+    segmentVolumeL: number
     /** 最优品评结论 */
     bestVerdict: string
   }
@@ -47,9 +51,10 @@ export interface BatchArchive {
 export async function buildBatchArchive(batchId: string): Promise<BatchArchive> {
   const batch = await db.batches.get(batchId)
   if (!batch) throw new Error('批次不存在，无法导出档案')
-  const [parcel, tank, allReadings, allOperations, mlf, allTastings] = await Promise.all([
+  const [parcel, tank, segments, allReadings, allOperations, mlf, allTastings] = await Promise.all([
     batch.parcelId ? db.parcels.get(batch.parcelId) : Promise.resolve(undefined),
     batch.tankId ? db.tanks.get(batch.tankId) : Promise.resolve(undefined),
+    listSegmentsByBatch(batchId),
     listReadings(),
     listOperations(),
     db.mlfs.where('batchId').equals(batchId).first(),
@@ -80,6 +85,7 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
     batch: stripRevision(batch),
     parcel: parcel ? stripRevision(parcel) : null,
     tank: tank ? stripRevision(tank) : null,
+    segments: segments.map(stripRevision),
     readings: readings.map(stripRevision),
     operations: operations.map(stripRevision),
     mlf: mlf ? stripRevision(mlf) : null,
@@ -91,6 +97,7 @@ export async function buildBatchArchive(batchId: string): Promise<BatchArchive> 
       potentialAbv: first ? potentialAbv(first.gravity) : 0,
       estimatedAbv: first && last ? abvFromSg(first.gravity, last.gravity) : 0,
       overTempDays: readings.filter((row) => isOverTemp(row.tempC)).length,
+      segmentVolumeL: segments.reduce((sum, seg) => sum + seg.volumeL, 0),
       bestVerdict
     }
   }

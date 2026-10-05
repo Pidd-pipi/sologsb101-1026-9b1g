@@ -3,6 +3,8 @@ export interface Reading {
   id: string
   /** 所属批次 */
   batchId: string
+  /** 所属批次段（倒罐后读数按段记录） */
+  segmentId: string
   /** 记录日期 YYYY-MM-DD */
   date: string
   /** 比重（SG） */
@@ -27,5 +29,5 @@ export const OVER_TEMP_C = 30
 export const STUCK_DECLINE_THRESHOLD = 0.002
 
 export function createEmptyReading(): Omit<Reading, 'id'> {
-  return { batchId: '', date: new Date().toISOString().slice(0, 10), gravity: 1.09, tempC: 24, brix: 22 }
+  return { batchId: '', segmentId: '', date: new Date().toISOString().slice(0, 10), gravity: 1.09, tempC: 24, brix: 22 }
 }

@@ -11,6 +11,7 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { db, updateBatch, type BatchRow, type ParcelRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useTankStore } from '@/stores/tankStore'
+import { useSegmentStore } from '@/stores/segmentStore'
 import {
   TANK_MATERIALS,
   TANK_STATES,
@@ -26,6 +27,7 @@ import { ROUTES } from '@/router'
 const route = useRoute()
 const router = useRouter()
 const store = useTankStore()
+const segmentStore = useSegmentStore()
 
 const { rows: tanks, ready } = useIdbTable<TankRow>(() => db.tanks, {
   compare: (a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN')
@@ -39,15 +41,23 @@ const selects: FilterSelectConfig[] = [
   { key: 'states', label: '罐位', options: TANK_STATES.map((item) => ({ label: item, value: item })) }
 ]
 
-/** 占用该罐的在罐批次 */
+/** 占用该罐的在罐段（取第一段对应的批次） */
 function occupancyOf(tankId: string): BatchRow | null {
-  return store.occupancyOf(tankId, batches.value)
+  const seg = segmentStore.segmentsInTank(tankId)[0]
+  if (!seg) return null
+  return batches.value.find((batch) => batch.id === seg.batchId) ?? null
 }
 
-function batchLabel(batch: BatchRow | null): string {
+/** 该罐的在罐段量合计（L） */
+function occupiedVolumeOf(tankId: string): number {
+  return segmentStore.occupiedVolumeInTank(tankId)
+}
+
+function batchLabel(batch: BatchRow | null, tankId?: string): string {
   if (!batch) return '—'
   const parcel = parcels.value.find((item) => item.id === batch.parcelId)
-  return `${parcel ? parcel.name : '未知地块'} · ${batch.volumeL}L`
+  const vol = tankId ? occupiedVolumeOf(tankId) : batch.volumeL
+  return `${parcel ? parcel.name : '未知地块'} · ${vol}L`
 }
 
 const filtered = computed(() => {
@@ -249,7 +259,7 @@ watch(
         </el-table-column>
         <el-table-column label="占用批次" min-width="200">
           <template #default="{ row }">
-            <span v-if="occupancyOf(row.id)">{{ batchLabel(occupancyOf(row.id)) }}</span>
+            <span v-if="occupancyOf(row.id)">{{ batchLabel(occupancyOf(row.id), row.id) }}</span>
             <span v-else class="muted">未占用</span>
           </template>
         </el-table-column>

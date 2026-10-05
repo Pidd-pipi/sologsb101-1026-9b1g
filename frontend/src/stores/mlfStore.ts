@@ -39,7 +39,7 @@ export const useMlfStore = defineStore('mlf', () => {
   }
 
   /** 启动苹乳：新建或复用记录，并联动批次进入苹乳发酵 */
-  async function startMlf(batchId: string, existing?: MlfRow): Promise<void> {
+  async function startMlf(batchId: string, segmentId: string, existing?: MlfRow): Promise<void> {
     const now = Date.now()
     if (existing) {
       await updateMlfRow(existing.id, { state: '进行中', startDate: existing.startDate || today(), endDate: '' })
@@ -47,6 +47,7 @@ export const useMlfStore = defineStore('mlf', () => {
       await putMlf({
         id: createId('mlf'),
         batchId,
+        segmentId,
         startDate: today(),
         endDate: '',
         malicG: MALIC_START_G,

@@ -7,9 +7,10 @@ import StageTag from '@/components/common/StageTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, type BatchRow, type MlfRow, type ParcelRow, type ReadingRow } from '@/utils/db'
+import { db, type BatchRow, type MlfRow, type ParcelRow, type ReadingRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useMlfStore } from '@/stores/mlfStore'
+import { useSegmentStore } from '@/stores/segmentStore'
 import { MALIC_DONE_THRESHOLD, MALIC_START_G, MLF_STATES } from '@/types/mlf'
 import type { FilterSelectConfig, FilterModel } from '@/types/filter'
 import { filtersToQuery } from '@/utils/query'
@@ -17,10 +18,12 @@ import { filtersToQuery } from '@/utils/query'
 const route = useRoute()
 const router = useRouter()
 const store = useMlfStore()
+const segmentStore = useSegmentStore()
 
 const { rows: mlfs, ready } = useIdbTable<MlfRow>(() => db.mlfs)
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
+const { rows: tanks } = useIdbTable<TankRow>(() => db.tanks)
 const { rows: readings } = useIdbTable<ReadingRow>(() => db.readings)
 
 const selects: FilterSelectConfig[] = [
@@ -31,6 +34,11 @@ function batchOf(batchId: string): BatchRow | null {
   return batches.value.find((item) => item.id === batchId) ?? null
 }
 
+function tankCode(tankId: string): string {
+  if (!tankId) return '已释放'
+  return tanks.value.find((item) => item.id === tankId)?.code ?? '未知罐'
+}
+
 function batchLabel(batchId: string): string {
   const batch = batchOf(batchId)
   if (!batch) return '批次已删除'
@@ -38,25 +46,34 @@ function batchLabel(batchId: string): string {
   return `${parcel ? parcel.name : '未知地块'} · ${batch.harvestDate}`
 }
 
-/** 该批次在苹乳期间的平均温度，用于判定苹乳是否具备条件 */
-function avgTemp(batchId: string): string {
-  const rows = readings.value.filter((row) => row.batchId === batchId)
+function segmentLabel(segmentId: string): string {
+  const seg = segmentStore.segments.find((item) => item.id === segmentId)
+  if (!seg) return '未分段'
+  return `段${seg.seq} · ${tankCode(seg.tankId)} · ${seg.volumeL}L`
+}
+
+/** 该段在苹乳期间的平均温度，用于判定苹乳是否具备条件 */
+function avgTemp(segmentId: string): string {
+  const rows = readings.value.filter((row) => row.segmentId === segmentId)
   if (rows.length === 0) return '—'
   return `${(rows.reduce((sum, row) => sum + row.tempC, 0) / rows.length).toFixed(1)} ℃`
 }
 
-/** 批次尚未建立苹乳记录时的候选列表 */
+/** 尚未建立苹乳记录的在罐段候选 */
 const candidates = computed(() =>
-  batches.value
-    .filter((batch) => batch.state !== '已出罐' && !mlfs.value.some((mlf) => mlf.batchId === batch.id))
-    .map((batch) => ({ batch, label: batchLabel(batch.id) }))
+  segmentStore.segments
+    .filter((seg) => {
+      const batch = batchOf(seg.batchId)
+      return batch !== null && batch.state !== '已出罐' && !mlfs.value.some((mlf) => mlf.segmentId === seg.id)
+    })
+    .map((seg) => ({ segment: seg, label: segmentLabel(seg.id) }))
 )
 
 const filtered = computed(() => {
   const keyword = String(store.filters.keyword ?? '').trim().toLowerCase()
   const states = Array.isArray(store.filters.states) ? store.filters.states : []
   return mlfs.value.filter((mlf) => {
-    const label = `${batchLabel(mlf.batchId)} ${mlf.state}`.toLowerCase()
+    const label = `${batchLabel(mlf.batchId)} ${segmentLabel(mlf.segmentId)} ${mlf.state}`.toLowerCase()
     if (keyword && !label.includes(keyword)) return false
     if (states.length > 0 && !states.includes(mlf.state)) return false
     return true
@@ -101,12 +118,14 @@ async function submitMalic(mlf: MlfRow): Promise<void> {
 }
 
 async function start(mlf: MlfRow): Promise<void> {
-  await store.startMlf(mlf.batchId, mlf)
+  await store.startMlf(mlf.batchId, mlf.segmentId, mlf)
   ElMessage.success('苹乳发酵已启动，批次状态置为「苹乳发酵」')
 }
 
-async function startForBatch(batchId: string): Promise<void> {
-  await store.startMlf(batchId)
+async function startForSegment(segmentId: string): Promise<void> {
+  const seg = segmentStore.segments.find((item) => item.id === segmentId)
+  if (!seg) return
+  await store.startMlf(seg.batchId, segmentId)
   ElMessage.success('苹乳发酵已启动')
 }
 
@@ -127,12 +146,15 @@ async function remove(mlf: MlfRow): Promise<void> {
   ElMessage.success('苹乳记录已删除')
 }
 
-/** 存在在罐批次但还没有苹乳记录时，创建一条未启动记录 */
-async function createPlaceholder(batchId: string): Promise<void> {
+/** 存在在罐段但还没有苹乳记录时，创建一条未启动记录 */
+async function createPlaceholder(segmentId: string): Promise<void> {
+  const seg = segmentStore.segments.find((item) => item.id === segmentId)
+  if (!seg) return
   const now = Date.now()
   await db.mlfs.put({
     id: `mlf-${now.toString(36)}`,
-    batchId,
+    batchId: seg.batchId,
+    segmentId,
     startDate: '',
     endDate: '',
     malicG: MALIC_START_G,
@@ -191,14 +213,14 @@ watch(
     <el-card v-if="candidates.length > 0" shadow="never">
       <template #header>
         <div class="card-title">
-          <span>待建苹乳跟踪的在罐批次（{{ candidates.length }}）</span>
-          <span class="muted">酒精发酵结束后即可启动苹乳</span>
+          <span>待建苹乳跟踪的在罐段（{{ candidates.length }}）</span>
+          <span class="muted">酒精发酵结束后即可按段启动苹乳</span>
         </div>
       </template>
       <div class="candidate-row">
-        <el-tag v-for="item in candidates" :key="item.batch.id" closable @close="createPlaceholder(item.batch.id)">
+        <el-tag v-for="item in candidates" :key="item.segment.id" closable @close="createPlaceholder(item.segment.id)">
           {{ item.label }}
-          <el-button link type="primary" size="small" @click="startForBatch(item.batch.id)">启动苹乳</el-button>
+          <el-button link type="primary" size="small" @click="startForSegment(item.segment.id)">启动苹乳</el-button>
         </el-tag>
       </div>
     </el-card>
@@ -211,10 +233,11 @@ watch(
     />
 
     <el-table v-else :data="filtered" stripe border>
-      <el-table-column label="批次" min-width="200">
+      <el-table-column label="批次段" min-width="220">
         <template #default="{ row }">
           <div>{{ batchLabel(row.batchId) }}</div>
-          <div class="muted">平均温度 {{ avgTemp(row.batchId) }}</div>
+          <div class="muted">{{ segmentLabel(row.segmentId) }}</div>
+          <div class="muted">段平均温度 {{ avgTemp(row.segmentId) }}</div>
         </template>
       </el-table-column>
       <el-table-column label="批次状态" width="130">

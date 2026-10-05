@@ -8,6 +8,8 @@ export interface Operation {
   id: string
   /** 所属批次 */
   batchId: string
+  /** 所属批次段（倒罐 / 压帽 / 淋皮都落到具体段） */
+  segmentId: string
   /** 作业类型 */
   type: OperationType
   /** 计划日期 YYYY-MM-DD */
@@ -28,6 +30,7 @@ export const OPERATION_STATES: OperationState[] = ['计划', '已完成']
 export function createEmptyOperation(): Omit<Operation, 'id' | 'seq'> {
   return {
     batchId: '',
+    segmentId: '',
     type: '倒罐',
     date: new Date().toISOString().slice(0, 10),
     durationMin: 45,

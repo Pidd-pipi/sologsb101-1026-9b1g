@@ -7,9 +7,10 @@ import { Plus, Rank } from '@element-plus/icons-vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import StageTag from '@/components/common/StageTag.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
-import { db, type BatchRow, type OperationRow, type ParcelRow } from '@/utils/db'
+import { db, type BatchRow, type OperationRow, type ParcelRow, type TankRow } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useOperationStore } from '@/stores/operationStore'
+import { useSegmentStore } from '@/stores/segmentStore'
 import { OPERATION_STATES, OPERATION_TYPES, createEmptyOperation, type Operation } from '@/types/operation'
 import type { FilterSelectConfig, FilterModel } from '@/types/filter'
 import { filtersToQuery } from '@/utils/query'
@@ -17,12 +18,14 @@ import { filtersToQuery } from '@/utils/query'
 const route = useRoute()
 const router = useRouter()
 const store = useOperationStore()
+const segmentStore = useSegmentStore()
 
 const { rows: operations, ready } = useIdbTable<OperationRow>(() => db.operations, {
   compare: (a, b) => a.seq - b.seq || a.date.localeCompare(b.date)
 })
 const { rows: batches } = useIdbTable<BatchRow>(() => db.batches)
 const { rows: parcels } = useIdbTable<ParcelRow>(() => db.parcels)
+const { rows: tanks } = useIdbTable<TankRow>(() => db.tanks)
 
 const selects: FilterSelectConfig[] = [
   { key: 'types', label: '作业类型', options: OPERATION_TYPES.map((item) => ({ label: item, value: item })) },
@@ -34,6 +37,21 @@ function batchLabel(batchId: string): string {
   if (!batch) return '批次已删除'
   const parcel = parcels.value.find((item) => item.id === batch.parcelId)
   return `${parcel ? parcel.name : '未知地块'} · ${batch.harvestDate}`
+}
+
+function tankCode(tankId: string): string {
+  if (!tankId) return '已释放'
+  return tanks.value.find((item) => item.id === tankId)?.code ?? '未知罐'
+}
+
+function segmentLabel(segmentId: string): string {
+  const seg = segmentStore.segments.find((item) => item.id === segmentId)
+  if (!seg) return '未分段'
+  return `段${seg.seq} · ${tankCode(seg.tankId)} · ${seg.volumeL}L`
+}
+
+function segmentOptionsFor(batchId: string) {
+  return segmentStore.segmentsOfBatch(batchId)
 }
 
 const filtered = computed(() => {
@@ -95,13 +113,18 @@ const form = reactive<Omit<Operation, 'id' | 'seq'>>(createEmptyOperation())
 
 const rules: FormRules = {
   batchId: [{ required: true, message: '请选择批次', trigger: 'change' }],
+  segmentId: [{ required: true, message: '请选择批次段', trigger: 'change' }],
   operator: [{ required: true, message: '请填写操作人', trigger: 'blur' }]
 }
 
 function openCreate(): void {
   editingId.value = null
   Object.assign(form, createEmptyOperation())
-  if (store.currentBatchId) form.batchId = store.currentBatchId
+  if (store.currentBatchId) {
+    form.batchId = store.currentBatchId
+    const segs = segmentOptionsFor(store.currentBatchId)
+    if (segs.length > 0) form.segmentId = segs[0].id
+  }
   dialogVisible.value = true
 }
 
@@ -109,6 +132,7 @@ function openEdit(row: OperationRow): void {
   editingId.value = row.id
   Object.assign(form, {
     batchId: row.batchId,
+    segmentId: row.segmentId,
     type: row.type,
     date: row.date,
     durationMin: row.durationMin,
@@ -134,6 +158,18 @@ async function submit(): Promise<void> {
     ElMessage.error(error instanceof Error ? error.message : '保存失败')
   }
 }
+
+/** 切换批次时，默认选中该批次的第一个段 */
+watch(
+  () => form.batchId,
+  (batchId) => {
+    if (!batchId) return
+    const segs = segmentOptionsFor(batchId)
+    if (segs.length > 0 && !segs.some((seg) => seg.id === form.segmentId)) {
+      form.segmentId = segs[0].id
+    }
+  }
+)
 
 async function finish(row: OperationRow): Promise<void> {
   await store.finish(row.id)
@@ -226,7 +262,7 @@ watch(
             <el-tag size="small" effect="plain">{{ row.durationMin }} 分钟</el-tag>
           </div>
           <div class="op-item__meta">
-            {{ row.date }} · 操作人 {{ row.operator }} · {{ batchLabel(row.batchId) }}
+            {{ row.date }} · 操作人 {{ row.operator }} · {{ batchLabel(row.batchId) }} · {{ segmentLabel(row.segmentId) }}
           </div>
         </div>
         <div class="op-item__actions">
@@ -248,6 +284,16 @@ watch(
               :key="item.id"
               :label="batchLabel(item.id)"
               :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="批次段" prop="segmentId">
+          <el-select v-model="form.segmentId" class="full" placeholder="选择作业所属段">
+            <el-option
+              v-for="seg in segmentOptionsFor(form.batchId)"
+              :key="seg.id"
+              :label="segmentLabel(seg.id)"
+              :value="seg.id"
             />
           </el-select>
         </el-form-item>

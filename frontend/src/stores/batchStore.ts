@@ -9,6 +9,8 @@ import type { FilterModel } from '@/types/filter'
 import type { BatchRow } from '@/utils/db'
 import {
   assertTankAssignable,
+  createInitialSegment,
+  db,
   putBatch,
   removeBatch,
   shipBatch as shipBatchRow,
@@ -46,16 +48,24 @@ export const useBatchStore = defineStore('batch', () => {
     currentBatchId.value = id
   }
 
-  /** 入罐登记：先校验罐位可分配，再把罐置为「在用」 */
+  /** 入罐登记：先校验罐位可分配与容量，再建批次并补出唯一整段，最后把罐置为「在用」 */
   async function createBatch(payload: Omit<Batch, 'id' | 'lastOperationAt'>): Promise<string> {
     error.value = null
     if (!payload.parcelId) throw new Error('请选择地块')
     if (!payload.tankId) throw new Error('请选择发酵罐')
+    if (payload.volumeL <= 0) throw new Error('入罐量必须大于 0')
     await assertTankAssignable(payload.tankId, null)
+    const tank = await db.tanks.get(payload.tankId)
+    if (tank && payload.volumeL > tank.capacityL) {
+      throw new Error(`入罐量 ${payload.volumeL}L 超过罐 ${tank.code} 容量 ${tank.capacityL}L，差 ${payload.volumeL - tank.capacityL}L`)
+    }
     const now = Date.now()
     const id = createId('batch')
-    await putBatch({ ...payload, id, lastOperationAt: null, revision: ROW_REVISION, createdAt: now, updatedAt: now })
-    await updateTank(payload.tankId, { state: '在用' })
+    await db.transaction('rw', [db.batches, db.segments, db.tanks], async () => {
+      await putBatch({ ...payload, id, lastOperationAt: null, revision: ROW_REVISION, createdAt: now, updatedAt: now })
+      await createInitialSegment(id, payload.tankId, payload.volumeL)
+      await updateTank(payload.tankId, { state: '在用' })
+    })
     currentBatchId.value = id
     return id
   }
